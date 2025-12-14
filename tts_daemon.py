@@ -34,7 +34,7 @@ LOG_FILE = CLAUDE_DIR / "tts_daemon.log"
 
 # Config
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = "gemini-2.5-flash-preview-native-audio-dialog"
+MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 VOICE = "Aoede"  # Aoede, Kore, Puck, Charon, Fenrir, Leda, Orus, Zephyr
 SYSTEM_INSTRUCTION = "Speak softly and calmly, like a gentle ASMR narrator. Keep responses brief."
 
@@ -62,6 +62,7 @@ class TTSDaemon:
     def __init__(self):
         self.running = False
         self.session = None
+        self.session_cm = None  # Context manager for session
         self.client = None
         self.reconnect_delay = 1
         self.max_reconnect_delay = 30
@@ -156,7 +157,9 @@ class TTSDaemon:
                 system_instruction=SYSTEM_INSTRUCTION
             )
 
-            self.session = await self.client.aio.live.connect(model=MODEL, config=config)
+            # Get the async context manager and enter it manually
+            self.session_cm = self.client.aio.live.connect(model=MODEL, config=config)
+            self.session = await self.session_cm.__aenter__()
             self.reconnect_delay = 1  # Reset on successful connect
             logger.info(f"Connected to Gemini Live API (model={MODEL}, voice={VOICE})")
             return True
@@ -200,7 +203,14 @@ class TTSDaemon:
 
         except Exception as e:
             logger.error(f"Live API synthesis error: {e}")
-            self.session = None  # Force reconnect
+            # Close session and force reconnect
+            if self.session_cm:
+                try:
+                    await self.session_cm.__aexit__(None, None, None)
+                except:
+                    pass
+            self.session = None
+            self.session_cm = None
             return None
 
     async def speak(self, text: str):
@@ -330,11 +340,13 @@ class TTSDaemon:
         logger.info("Shutting down...")
         self.running = False
 
-        if self.session:
+        if self.session_cm:
             try:
-                await self.session.close()
+                await self.session_cm.__aexit__(None, None, None)
             except:
                 pass
+            self.session = None
+            self.session_cm = None
 
         # Stop event loop
         asyncio.get_event_loop().stop()
