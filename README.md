@@ -1,5 +1,7 @@
 # Claude Code TTS Hook
 
+🇷🇺 [Русская версия](README_RU.md)
+
 ASMR-style text-to-speech hook for Claude Code that reads the last assistant message using Google Gemini.
 
 ## Architecture
