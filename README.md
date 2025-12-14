@@ -2,178 +2,244 @@
 
 🇷🇺 [Русская версия](README_RU.md)
 
-ASMR-style text-to-speech hook for Claude Code that reads the last assistant message using Google Gemini.
+ASMR-style text-to-speech for Claude Code using Google Gemini Live API with **minimal latency (~100ms)**.
 
 ## Architecture
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph "Claude Code"
-        CC["Claude Code<br/>Stop Hook"]
+        Hook["Stop Hook"]
     end
 
-    subgraph "Local Processing"
-        Python["Python Script<br/>speak.py"]
-        Cache["TTS Cache<br/>~/.claude/tts_cache/"]
+    subgraph "speak_hook.py"
+        Parse["Parse Transcript"]
+        Summary["Gemini Flash<br/>ASMR Summary"]
     end
 
-    subgraph "Google Gemini APIs"
-        Flash["Gemini 2.0 Flash<br/>Summarization"]
-        TTS["Gemini 2.5 Flash<br/>Text-to-Speech"]
+    subgraph "tts_daemon.py"
+        Socket["Unix Socket"]
+        WS["WebSocket<br/>(persistent)"]
+        Cache["Audio Cache"]
+        Player["Audio Player"]
     end
 
-    subgraph "Output"
-        Audio["Audio Playback<br/>afplay/paplay/mpv"]
+    subgraph "Google"
+        Flash["Gemini 2.0 Flash"]
+        Live["Gemini Live API"]
     end
 
-    CC -->|passes transcript_path| Python
-    Python -->|extract last message| CC
-    Python -->|summarize with ASMR prompt| Flash
-    Flash -->|returns summary| Python
-    Python -->|check cache| Cache
-    Python -->|cache miss: synthesize| TTS
-    TTS -->|returns WAV bytes| Python
-    Python -->|save WAV| Cache
-    Python -->|play async| Audio
+    Hook -->|transcript_path| Parse
+    Parse -->|last message| Summary
+    Summary -->|request| Flash
+    Flash -->|1-2 sentences| Socket
+    Socket -->|text| WS
+    WS <-->|persistent connection| Live
+    Live -->|PCM audio| Cache
+    Cache --> Player
 ```
 
-## Description
+## Why Daemon?
 
-When a Claude Code session stops, this hook:
-1. Extracts the last assistant message from the transcript
-2. Summarizes it with ASMR-friendly phrasing using Gemini Flash
-3. Converts to speech using Gemini's TTS with the "Aoede" voice
-4. Caches results to avoid re-synthesizing identical texts
-5. Plays audio asynchronously
+**Without daemon (REST API):** ~2-3 seconds latency
+- HTTP connection setup
+- TLS handshake
+- API authentication
+- Response processing
 
-Perfect for getting a gentle, non-intrusive summary of what was accomplished during your coding session.
+**With daemon (WebSocket):** ~100ms latency
+- Persistent connection (no handshake)
+- Instant audio streaming
+- Aggressive caching
 
-## Requirements
+## Quick Start
 
-- Python 3.7+
-- `GEMINI_API_KEY` environment variable set with a valid Google Generative AI API key
-- macOS (afplay), Linux (paplay/aplay/mpv), or compatible audio player
-
-## Installation
-
-### 1. Clone or download this repository
+### 1. Install dependency
 
 ```bash
+pip install google-genai
+```
+
+### 2. Set API key
+
+```bash
+export GEMINI_API_KEY="your-api-key"
+# Add to ~/.zshrc or ~/.bashrc for persistence
+```
+
+### 3. Install files
+
+```bash
+# Clone repository
 git clone https://github.com/serejaris/claude-code-tts.git
-# or copy the files manually
+cd claude-code-tts
+
+# Copy to Claude hooks directory
+mkdir -p ~/.claude/hooks
+cp tts_daemon.py speak_hook.py ~/.claude/hooks/
+chmod +x ~/.claude/hooks/*.py
 ```
 
-### 2. Set up your API key
-
-```bash
-export GEMINI_API_KEY="your-api-key-here"
-```
-
-For permanent setup, add to your shell config (`~/.zshrc`, `~/.bashrc`, etc.):
-
-```bash
-export GEMINI_API_KEY="your-api-key-here"
-```
-
-### 3. Configure Claude Code
+### 4. Configure Claude Code
 
 Add to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "on_stop": [
-      {
+    "Stop": [{
+      "hooks": [{
         "type": "command",
-        "command": "python3 /path/to/claude-code-tts-hook/speak.py",
-        "stdin": "json",
-        "timeout": 120
-      }
-    ]
+        "command": "python3 ~/.claude/hooks/speak_hook.py",
+        "timeout": 15
+      }]
+    }]
   }
 }
 ```
 
-Replace `/path/to/claude-code-tts-hook` with the actual path where you installed the hook.
+### 5. Start daemon
 
-## Available Voices
-
-The hook uses the "Aoede" voice by default (calm, gentle ASMR-friendly). You can change the `VOICE` variable in `speak.py` to any of these:
-
-- **Aoede** (default) - Calm and gentle
-- **Puck** - Bright and playful
-- **Kore** - Warm and friendly
-- **Charon** - Deep and thoughtful
-- **Fenrir** - Strong and confident
-- **Leda** - Soft and soothing
-- **Orus** - Clear and crisp
-- **Zephyr** - Light and breezy
-
-Edit the `VOICE` variable at the top of `speak.py`:
-
-```python
-VOICE = "Aoede"  # Change to any voice above
+```bash
+python3 ~/.claude/hooks/tts_daemon.py
 ```
 
-## Caching
+For auto-start, add to `~/.zshrc`:
 
-Synthesized audio is cached in `~/.claude/tts_cache/` using MD5 hashes of the text and voice name. This means:
+```bash
+# Start TTS daemon if not running
+(pgrep -f tts_daemon.py > /dev/null || nohup python3 ~/.claude/hooks/tts_daemon.py > /dev/null 2>&1 &) 2>/dev/null
+```
 
-- Identical summaries are never synthesized twice
-- Cache persists across sessions
-- Each voice has separate cache entries
-- No automatic cleanup (safe to delete `~/.claude/tts_cache/` anytime)
+## Testing
+
+```bash
+# Test daemon directly
+echo "Hello, this is a test" | nc -U ~/.claude/tts.sock
+
+# Check daemon status
+pgrep -f tts_daemon.py
+
+# View logs
+tail -f ~/.claude/tts_daemon.log
+
+# Stop daemon
+pkill -f tts_daemon.py
+```
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `tts_daemon.py` | Background daemon with persistent WebSocket to Gemini Live API |
+| `speak_hook.py` | Claude Code hook that parses transcript and sends to daemon |
+| `speak.py` | Standalone version (no daemon, higher latency) |
+
+## Configuration
+
+### Voices
+
+Edit `VOICE` in `tts_daemon.py`:
+
+| Voice | Character |
+|-------|-----------|
+| **Aoede** (default) | Calm, gentle |
+| Kore | Warm, friendly |
+| Puck | Bright, playful |
+| Charon | Deep, thoughtful |
+| Fenrir | Strong, confident |
+| Leda | Soft, soothing |
+| Orus | Clear, crisp |
+| Zephyr | Light, breezy |
+
+### Paths
+
+```
+~/.claude/
+├── hooks/
+│   ├── tts_daemon.py      # Daemon
+│   └── speak_hook.py      # Hook
+├── tts_cache/             # Cached audio files
+├── tts.sock               # Unix socket
+├── tts_daemon.pid         # Daemon PID
+└── tts_daemon.log         # Daemon logs
+```
 
 ## How It Works
 
-### Transcript Format
-
-The hook reads JSONL-formatted transcript files where each line contains:
-
-```json
-{"type": "assistant", "message": {"content": [{"type": "text", "text": "..."}]}}
-```
-
-### ASMR Summarization
-
-The hook uses Gemini Flash to transform technical messages into gentle ASMR-style summaries:
-
-**Input:** "Fixed the authentication bug in auth.py line 42, updated config files"
-**Output:** "Fixed the auth bug for you... config is updated"
-
-The summarization preserves meaning while removing technical details and file paths for a more natural reading experience.
-
-### Audio Playback
-
-Playback runs asynchronously in a new process, so Claude Code continues immediately without waiting for the audio to finish.
+1. **Claude Code stops** → triggers Stop hook
+2. **speak_hook.py** reads transcript, extracts last assistant message
+3. **Gemini Flash** summarizes to 1-2 ASMR-style sentences
+4. Summary sent to daemon via Unix socket
+5. **tts_daemon.py** synthesizes via persistent WebSocket
+6. Audio cached and played asynchronously
 
 ## Troubleshooting
 
-### "Summary error" or "TTS error" in stderr
+### Daemon not starting
 
-These are non-fatal errors that fall back gracefully:
-- Missing API key → no audio produced
-- Network timeout → truncated summary or original text
-- API errors → logs to stderr, script continues
+```bash
+# Check if already running
+pgrep -f tts_daemon.py
 
-### Audio not playing
+# Check logs
+cat ~/.claude/tts_daemon.log
 
-Check that your system has one of the supported audio players:
-- macOS: `afplay` (built-in)
-- Linux: `paplay` (PulseAudio), `aplay` (ALSA), or `mpv` (install via package manager)
+# Remove stale socket/pid
+rm -f ~/.claude/tts.sock ~/.claude/tts_daemon.pid
+```
 
-### Cache issues
+### No audio
 
-Clear cache and retry:
+- macOS: `afplay` is built-in
+- Linux: Install `pulseaudio-utils` (for `paplay`) or `mpv`
+
+```bash
+# Linux
+sudo apt install pulseaudio-utils
+# or
+sudo apt install mpv
+```
+
+### Socket connection refused
+
+Daemon might have crashed. Restart it:
+
+```bash
+pkill -f tts_daemon.py
+python3 ~/.claude/hooks/tts_daemon.py
+```
+
+### Clear cache
 
 ```bash
 rm -rf ~/.claude/tts_cache/
 ```
 
-## Environment Variables
+## Standalone Mode
 
-- `GEMINI_API_KEY` (required) - Your Google Generative AI API key
-- `VOICE` (optional, via speak.py) - Voice name for TTS
+If you prefer simpler setup without daemon (with higher latency), use `speak.py`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 /path/to/speak.py",
+        "timeout": 60
+      }]
+    }]
+  }
+}
+```
+
+## Requirements
+
+- Python 3.8+
+- `google-genai` package
+- `GEMINI_API_KEY` environment variable
+- Audio player: `afplay` (macOS) or `paplay`/`mpv` (Linux)
 
 ## License
 
