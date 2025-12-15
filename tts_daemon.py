@@ -31,14 +31,81 @@ SOCKET_PATH = CLAUDE_DIR / "tts.sock"
 PID_FILE = CLAUDE_DIR / "tts_daemon.pid"
 CACHE_DIR = CLAUDE_DIR / "tts_cache"
 LOG_FILE = CLAUDE_DIR / "tts_daemon.log"
+CONFIG_PATH = CLAUDE_DIR / "tts_config.json"
 
-# Config
+# Gemini Config
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
-VOICE = "Aoede"  # Aoede, Kore, Puck, Charon, Fenrir, Leda, Orus, Zephyr
-SYSTEM_INSTRUCTION = """Speak softly and calmly, like a gentle ASMR narrator.
-Summarize the input in max 15 words. Use first person. Skip technical details and file paths.
-Support both Russian and English. Keep tone warm and encouraging."""
+
+# Presets
+MODES = {
+    "summary": "Summarize briefly in 1-2 sentences, keep only the main point",
+    "full": "Read the text as provided, naturally"
+}
+
+STYLES = {
+    "asmr": "Speak softly, gently, with calm pauses, like ASMR",
+    "neutral": "Speak naturally and clearly",
+    "energetic": "Speak with energy and enthusiasm"
+}
+
+LANGUAGES = {
+    "russian": "Speak in Russian",
+    "english": "Speak in English",
+    "german": "Speak in German",
+    "spanish": "Speak in Spanish",
+    "french": "Speak in French",
+    "chinese": "Speak in Chinese",
+    "japanese": "Speak in Japanese"
+}
+
+VOICES = ["Aoede", "Kore", "Puck", "Charon", "Fenrir", "Leda", "Orus", "Zephyr"]
+
+DEFAULT_CONFIG = {
+    "mode": "summary",
+    "voice": "Aoede",
+    "style": "asmr",
+    "language": "russian",
+    "max_chars": 1000,
+    "custom_styles": {}
+}
+
+
+def load_config() -> dict:
+    """Load config from file, fallback to defaults."""
+    if CONFIG_PATH.exists():
+        try:
+            config = json.loads(CONFIG_PATH.read_text())
+            # Merge with defaults for missing keys
+            return {**DEFAULT_CONFIG, **config}
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load config: {e}, using defaults")
+    return DEFAULT_CONFIG.copy()
+
+
+def build_instruction(config: dict) -> str:
+    """Build system_instruction from config."""
+    parts = []
+
+    # Mode
+    mode = config.get("mode", "summary")
+    if mode in MODES:
+        parts.append(MODES[mode])
+
+    # Style (preset or custom)
+    style = config.get("style", "asmr")
+    custom_styles = config.get("custom_styles", {})
+    if style in STYLES:
+        parts.append(STYLES[style])
+    elif style in custom_styles:
+        parts.append(custom_styles[style])
+
+    # Language
+    lang = config.get("language", "russian")
+    if lang in LANGUAGES:
+        parts.append(LANGUAGES[lang])
+
+    return ". ".join(parts) + "."
 
 # Audio config
 SAMPLE_RATE = 24000
@@ -68,12 +135,14 @@ class TTSDaemon:
         self.client = None
         self.reconnect_delay = 1
         self.max_reconnect_delay = 30
+        self.current_config = None  # Track config for reconnection
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def get_cache_path(self, text: str) -> Path:
-        """Generate cache path based on text hash."""
-        hash_key = hashlib.md5(f"{text}:{VOICE}".encode()).hexdigest()
+    def get_cache_path(self, text: str, config: dict) -> Path:
+        """Generate cache path based on text and config hash."""
+        cache_key = f"{text}:{config.get('voice')}:{config.get('style')}:{config.get('mode')}:{config.get('language')}"
+        hash_key = hashlib.md5(cache_key.encode()).hexdigest()
         return CACHE_DIR / f"{hash_key}.wav"
 
     def save_audio(self, pcm_data: bytes, path: Path):
@@ -133,7 +202,7 @@ class TTSDaemon:
         except:
             pass
 
-    async def connect_live_api(self):
+    async def connect_live_api(self, tts_config: dict):
         """Establish WebSocket connection to Gemini Live API."""
         try:
             from google import genai
@@ -149,33 +218,67 @@ class TTSDaemon:
         try:
             self.client = genai.Client(api_key=GEMINI_API_KEY)
 
+            voice = tts_config.get("voice", "Aoede")
+            instruction = build_instruction(tts_config)
+
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE)
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
                     )
                 ),
-                system_instruction=SYSTEM_INSTRUCTION
+                system_instruction=instruction
             )
+
+            # Store current config for cache key comparison
+            self.current_config = tts_config.copy()
 
             # Get the async context manager and enter it manually
             self.session_cm = self.client.aio.live.connect(model=MODEL, config=config)
             self.session = await self.session_cm.__aenter__()
             self.reconnect_delay = 1  # Reset on successful connect
-            logger.info(f"Connected to Gemini Live API (model={MODEL}, voice={VOICE})")
+            logger.info(f"Connected to Gemini Live API (voice={voice}, instruction={instruction[:50]}...)")
             return True
 
         except Exception as e:
             logger.error(f"Failed to connect to Live API: {e}")
             return False
 
-    async def synthesize_live(self, text: str) -> Optional[bytes]:
+    def config_changed(self, new_config: dict) -> bool:
+        """Check if config changed requiring reconnection."""
+        if not self.current_config:
+            return True
+        # Check relevant fields that affect the session
+        for key in ["voice", "style", "mode", "language"]:
+            if self.current_config.get(key) != new_config.get(key):
+                return True
+        # Check custom_styles if current style is custom
+        style = new_config.get("style", "")
+        if style not in STYLES:
+            old_custom = self.current_config.get("custom_styles", {}).get(style)
+            new_custom = new_config.get("custom_styles", {}).get(style)
+            if old_custom != new_custom:
+                return True
+        return False
+
+    async def synthesize_live(self, text: str, tts_config: dict) -> Optional[bytes]:
         """Synthesize speech using Live API WebSocket."""
         from google.genai import types
 
+        # Reconnect if config changed
+        if self.config_changed(tts_config):
+            if self.session_cm:
+                try:
+                    await self.session_cm.__aexit__(None, None, None)
+                except:
+                    pass
+                self.session = None
+                self.session_cm = None
+            logger.info("Config changed, reconnecting...")
+
         if not self.session:
-            if not await self.connect_live_api():
+            if not await self.connect_live_api(tts_config):
                 return None
 
         try:
@@ -188,18 +291,25 @@ class TTSDaemon:
             # Collect audio chunks
             audio_chunks = []
             async for response in self.session.receive():
+                logger.debug(f"API response: {type(response).__name__}, has_server_content={bool(response.server_content)}")
+
                 if response.server_content:
                     if response.server_content.model_turn:
+                        parts_count = len(response.server_content.model_turn.parts)
+                        logger.debug(f"model_turn: {parts_count} parts")
                         for part in response.server_content.model_turn.parts:
                             if part.inline_data and part.inline_data.data:
+                                logger.debug(f"Audio chunk: {len(part.inline_data.data)} bytes")
                                 audio_chunks.append(part.inline_data.data)
 
                     # Check if turn is complete
                     if response.server_content.turn_complete:
+                        logger.debug(f"Turn complete, total chunks: {len(audio_chunks)}")
                         break
 
             if audio_chunks:
                 return b''.join(audio_chunks)
+            logger.warning(f"No audio chunks received for text: {text[:100]}...")
             return None
 
         except Exception as e:
@@ -219,8 +329,18 @@ class TTSDaemon:
         if not text.strip():
             return
 
+        # Load config on each request
+        tts_config = load_config()
+
         text = text.strip()
-        cache_path = self.get_cache_path(text)
+
+        # Apply max_chars limit
+        max_chars = tts_config.get("max_chars", 1000)
+        if len(text) > max_chars:
+            text = text[:max_chars]
+            logger.debug(f"Truncated to {max_chars} chars")
+
+        cache_path = self.get_cache_path(text, tts_config)
 
         # Check cache
         if cache_path.exists():
@@ -230,7 +350,7 @@ class TTSDaemon:
 
         # Synthesize
         logger.info(f"Synthesizing: {text[:50]}...")
-        pcm_data = await self.synthesize_live(text)
+        pcm_data = await self.synthesize_live(text, tts_config)
 
         if pcm_data:
             # Save to cache and play
@@ -276,8 +396,9 @@ class TTSDaemon:
         """Keep WebSocket connection alive with periodic reconnection."""
         while self.running:
             if not self.session:
+                tts_config = load_config()
                 logger.info("Attempting to connect...")
-                if await self.connect_live_api():
+                if await self.connect_live_api(tts_config):
                     self.reconnect_delay = 1
                 else:
                     logger.info(f"Reconnecting in {self.reconnect_delay}s...")
@@ -321,8 +442,9 @@ class TTSDaemon:
             # Start socket server
             server = await self.start_socket_server()
 
-            # Initial connection
-            await self.connect_live_api()
+            # Initial connection with config
+            tts_config = load_config()
+            await self.connect_live_api(tts_config)
 
             # Start connection maintainer
             maintain_task = asyncio.create_task(self.maintain_connection())

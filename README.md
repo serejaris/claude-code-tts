@@ -74,6 +74,9 @@ cd claude-code-tts
 mkdir -p ~/.claude/hooks
 cp tts_daemon.py speak_hook.py ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.py
+
+# Copy config (optional, defaults work fine)
+cp tts_config.example.json ~/.claude/tts_config.json
 ```
 
 ### 4. Configure Claude Code
@@ -133,9 +136,29 @@ pkill -f tts_daemon.py
 
 ## Configuration
 
-### Voices
+Create `~/.claude/tts_config.json` (or copy from `tts_config.example.json`):
 
-Edit `VOICE` in `tts_daemon.py`:
+```json
+{
+  "mode": "summary",
+  "voice": "Aoede",
+  "style": "asmr",
+  "language": "russian",
+  "max_chars": 1000,
+  "custom_styles": {}
+}
+```
+
+**Changes apply immediately** — no daemon restart needed.
+
+### Modes
+
+| Mode | Behavior |
+|------|----------|
+| `summary` | Summarizes in 1-2 sentences (default) |
+| `full` | Reads text as-is |
+
+### Voices
 
 | Voice | Character |
 |-------|-----------|
@@ -148,6 +171,36 @@ Edit `VOICE` in `tts_daemon.py`:
 | Orus | Clear, crisp |
 | Zephyr | Light, breezy |
 
+### Styles
+
+| Style | Behavior |
+|-------|----------|
+| `asmr` | Soft, gentle, with calm pauses (default) |
+| `neutral` | Natural and clear |
+| `energetic` | With energy and enthusiasm |
+
+Custom styles:
+```json
+{
+  "custom_styles": {
+    "mentor": "Speak like a wise mentor, calm and thoughtful"
+  }
+}
+```
+Then use: `"style": "mentor"`
+
+### Languages
+
+| Language | Key |
+|----------|-----|
+| Russian | `russian` (default) |
+| English | `english` |
+| German | `german` |
+| Spanish | `spanish` |
+| French | `french` |
+| Chinese | `chinese` |
+| Japanese | `japanese` |
+
 ### Paths
 
 ```
@@ -155,6 +208,7 @@ Edit `VOICE` in `tts_daemon.py`:
 ├── hooks/
 │   ├── tts_daemon.py      # Daemon
 │   └── speak_hook.py      # Hook
+├── tts_config.json        # Configuration (create from example)
 ├── tts_cache/             # Cached audio files
 ├── tts.sock               # Unix socket
 ├── tts_daemon.pid         # Daemon PID
@@ -169,6 +223,43 @@ Edit `VOICE` in `tts_daemon.py`:
 4. **tts_daemon.py** sends to Gemini Live API via persistent WebSocket
 5. **Live API** summarizes via system_instruction and synthesizes audio in single request
 6. Audio cached and played asynchronously
+
+## Debugging
+
+### Enable debug logging
+
+Run daemon with `--debug` flag to see detailed logs in console:
+
+```bash
+python3 ~/.claude/hooks/tts_daemon.py --debug
+```
+
+### What logs show
+
+Debug logs include:
+
+- **API responses:** Type of each response from Gemini API, presence of `server_content`
+- **model_turn details:** Number of parts in each turn from the model
+- **Audio chunks:** Size in bytes of each audio chunk received
+- **Turn completion:** When response collection is complete, total chunk count
+- **Empty chunks warning:** Alert when no audio was synthesized for input text
+
+Example debug output:
+```
+2025-12-14 10:15:23 [DEBUG] API response: GenerateContentResponse, has_server_content=True
+2025-12-14 10:15:23 [DEBUG] model_turn: 2 parts
+2025-12-14 10:15:23 [DEBUG] Audio chunk: 4096 bytes
+2025-12-14 10:15:23 [DEBUG] Audio chunk: 3840 bytes
+2025-12-14 10:15:23 [DEBUG] Turn complete, total chunks: 2
+```
+
+### Log file location
+
+```bash
+tail -f ~/.claude/tts_daemon.log
+```
+
+All events (INFO, WARNING, ERROR) are always logged to file, regardless of `--debug` flag.
 
 ## Troubleshooting
 
