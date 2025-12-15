@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Claude Code Stop Hook for TTS
-Extracts last assistant message, summarizes it, and sends to TTS daemon.
+Extracts last assistant message and sends to TTS daemon.
 
 Usage in ~/.claude/settings.json:
 {
@@ -21,25 +21,13 @@ import json
 import os
 import socket
 import sys
-import urllib.request
 from pathlib import Path
 
 # Paths
 SOCKET_PATH = Path.home() / ".claude" / "tts.sock"
 
 # Config
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-SUMMARIZE_MODEL = "gemini-2.0-flash"
-
-ASMR_PROMPT = """Summarize in 1 short sentence. Soft, calm tone. First person. Same language as input.
-Skip file paths and technical details. Focus on what was accomplished.
-
-Examples:
-- "I updated config and fixed bug in auth.py:42" → "Fixed the auth bug for you..."
-- "Добавил endpoint и написал тесты" → "Добавила экспорт и тесты..."
-- "Refactored database, added pooling" → "Database refactored with pooling..."
-
-Summarize this:"""
+MAX_TEXT_LENGTH = 1000
 
 
 def extract_last_assistant_message(transcript_path: str) -> str:
@@ -79,42 +67,6 @@ def extract_last_assistant_message(transcript_path: str) -> str:
         return ""
 
 
-def summarize_asmr(text: str) -> str:
-    """Create ASMR-style summary using Gemini Flash."""
-    if not GEMINI_API_KEY or not text:
-        return text[:200] if text else ""
-
-    # Limit input to avoid long processing
-    text = text[:1000]
-
-    request_body = json.dumps({
-        "contents": [
-            {"role": "user", "parts": [{"text": f"{ASMR_PROMPT}\n{text}"}]}
-        ],
-        "generationConfig": {
-            "maxOutputTokens": 60,
-            "temperature": 0.7
-        }
-    }).encode()
-
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{SUMMARIZE_MODEL}:generateContent",
-        data=request_body,
-        headers={
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json"
-        }
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        sys.stderr.write(f"Summary error: {e}\n")
-        # Fallback: first sentence or truncated
-        first_sentence = text.split('.')[0]
-        return first_sentence[:100] if first_sentence else "Done"
 
 
 def send_to_daemon(text: str) -> bool:
@@ -157,9 +109,9 @@ def main():
         send_to_daemon("Ready")
         sys.exit(0)
 
-    # Summarize and send
-    summary = summarize_asmr(last_message)
-    send_to_daemon(summary)
+    # Send raw text to daemon (limited to MAX_TEXT_LENGTH)
+    text_to_send = last_message[:MAX_TEXT_LENGTH]
+    send_to_daemon(text_to_send)
     sys.exit(0)
 
 

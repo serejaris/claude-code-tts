@@ -36,7 +36,9 @@ LOG_FILE = CLAUDE_DIR / "tts_daemon.log"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 VOICE = "Aoede"  # Aoede, Kore, Puck, Charon, Fenrir, Leda, Orus, Zephyr
-SYSTEM_INSTRUCTION = "Speak softly and calmly, like a gentle ASMR narrator. Keep responses brief."
+SYSTEM_INSTRUCTION = """Speak softly and calmly, like a gentle ASMR narrator.
+Summarize the input in max 15 words. Use first person. Skip technical details and file paths.
+Support both Russian and English. Keep tone warm and encouraging."""
 
 # Audio config
 SAMPLE_RATE = 24000
@@ -177,10 +179,9 @@ class TTSDaemon:
                 return None
 
         try:
-            # Send text to synthesize
-            prompt = f"Say exactly this: {text}"
+            # Send text to synthesize (summarization handled by system_instruction)
             await self.session.send_client_content(
-                turns=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+                turns=[types.Content(role="user", parts=[types.Part(text=text)])],
                 turn_complete=True
             )
 

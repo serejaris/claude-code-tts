@@ -14,7 +14,6 @@ flowchart LR
 
     subgraph "speak_hook.py"
         Parse["Parse Transcript"]
-        Summary["Gemini Flash<br/>ASMR Summary"]
     end
 
     subgraph "tts_daemon.py"
@@ -25,15 +24,12 @@ flowchart LR
     end
 
     subgraph "Google"
-        Flash["Gemini 2.0 Flash"]
-        Live["Gemini Live API"]
+        Live["Gemini Live API<br/>(with summarization)"]
     end
 
     Hook -->|transcript_path| Parse
-    Parse -->|last message| Summary
-    Summary -->|request| Flash
-    Flash -->|1-2 sentences| Socket
-    Socket -->|text| WS
+    Parse -->|last message| Socket
+    Socket -->|raw text| WS
     WS <-->|persistent connection| Live
     Live -->|PCM audio| Cache
     Cache --> Player
@@ -169,9 +165,9 @@ Edit `VOICE` in `tts_daemon.py`:
 
 1. **Claude Code stops** → triggers Stop hook
 2. **speak_hook.py** reads transcript, extracts last assistant message
-3. **Gemini Flash** summarizes to 1-2 ASMR-style sentences
-4. Summary sent to daemon via Unix socket
-5. **tts_daemon.py** synthesizes via persistent WebSocket
+3. Raw text sent to daemon via Unix socket (max 1000 chars)
+4. **tts_daemon.py** sends to Gemini Live API via persistent WebSocket
+5. **Live API** summarizes via system_instruction and synthesizes audio in single request
 6. Audio cached and played asynchronously
 
 ## Troubleshooting
