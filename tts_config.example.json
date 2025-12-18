@@ -1,0 +1,11 @@
+{
+  "mode": "summary",
+  "voice": "Aoede",
+  "style": "asmr",
+  "language": "russian",
+  "max_chars": 1000,
+  "custom_styles": {
+    "mentor": "Speak like a wise mentor, calm and thoughtful",
+    "excited": "Speak with excitement, like sharing great news"
+  }
+}

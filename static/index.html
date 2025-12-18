@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS Configuration</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>TTS Configuration</h1>
+            <div id="status" class="status">
+                <span class="dot"></span>
+                <span class="text">Checking...</span>
+            </div>
+        </header>
+
+        <main>
+            <section class="card">
+                <h2>Voice Settings</h2>
+                <div class="form-group">
+                    <label for="voice">Voice</label>
+                    <select id="voice"></select>
+                </div>
+                <div class="form-group">
+                    <label for="language">Language</label>
+                    <select id="language"></select>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Mode & Style</h2>
+                <div class="form-group">
+                    <label for="mode">Mode</label>
+                    <select id="mode"></select>
+                </div>
+                <div class="form-group">
+                    <label for="style">Style</label>
+                    <select id="style"></select>
+                </div>
+                <div class="form-group">
+                    <label for="max_chars">Max Characters</label>
+                    <input type="number" id="max_chars" min="100" max="10000" step="100">
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Custom Styles</h2>
+                <div id="custom-styles-list"></div>
+                <div class="custom-style-form">
+                    <input type="text" id="new-style-name" placeholder="Style name">
+                    <input type="text" id="new-style-instruction" placeholder="Instruction (e.g., Speak like a mentor)">
+                    <button id="add-style-btn" class="btn-secondary">Add</button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Preview</h2>
+                <textarea id="preview-text" placeholder="Enter test text to preview voice..."></textarea>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="use-current-session" checked>
+                    <label for="use-current-session">Use current session (faster)</label>
+                </div>
+                <button id="preview-btn" class="btn-primary">
+                    <span class="btn-text">Test Voice</span>
+                    <span class="btn-loading" hidden>Playing...</span>
+                </button>
+            </section>
+        </main>
+
+        <footer>
+            <button id="save-btn" class="btn-primary">Save Configuration</button>
+            <button id="reset-btn" class="btn-secondary">Reset to Defaults</button>
+        </footer>
+
+        <div id="notification" class="notification" hidden></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
