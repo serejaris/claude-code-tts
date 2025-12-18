@@ -114,7 +114,7 @@ For auto-start, add to `~/.zshrc`:
 
 ```bash
 # Test daemon directly
-echo "Hello, this is a test" | nc -U ~/.claude/tts.sock
+echo "Hello, this is a test" | nc -U /tmp/claude-tts.sock
 
 # Check daemon status
 pgrep -f tts_daemon.py
@@ -210,7 +210,6 @@ Then use: `"style": "mentor"`
 │   └── speak_hook.py      # Hook
 ├── tts_config.json        # Configuration (create from example)
 ├── tts_cache/             # Cached audio files
-├── tts.sock               # Unix socket
 ├── tts_daemon.pid         # Daemon PID
 └── tts_daemon.log         # Daemon logs
 ```
@@ -273,7 +272,7 @@ pgrep -f tts_daemon.py
 cat ~/.claude/tts_daemon.log
 
 # Remove stale socket/pid
-rm -f ~/.claude/tts.sock ~/.claude/tts_daemon.pid
+rm -f /tmp/claude-tts.sock ~/.claude/tts_daemon.pid
 ```
 
 ### No audio

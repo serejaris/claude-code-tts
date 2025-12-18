@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 # Paths
-SOCKET_PATH = Path.home() / ".claude" / "tts.sock"
+SOCKET_PATH = Path("/tmp/claude-tts.sock")
 
 # Config
 MAX_TEXT_LENGTH = 1000

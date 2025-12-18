@@ -7,7 +7,7 @@ Usage:
     python3 tts_daemon.py [--debug]
 
 Test:
-    echo "Hello world" | nc -U ~/.claude/tts.sock
+    echo "Hello world" | nc -U /tmp/claude-tts.sock
 """
 
 import asyncio
@@ -28,6 +28,13 @@ from pathlib import Path
 from queue import Queue, Empty
 from typing import Optional
 
+# HTTP server
+try:
+    from aiohttp import web
+    HAS_AIOHTTP = True
+except ImportError:
+    HAS_AIOHTTP = False
+
 # Optional streaming audio support
 try:
     import sounddevice as sd
@@ -38,11 +45,15 @@ except ImportError:
 
 # Paths
 CLAUDE_DIR = Path.home() / ".claude"
-SOCKET_PATH = CLAUDE_DIR / "tts.sock"
+SOCKET_PATH = Path("/tmp/claude-tts.sock")
 PID_FILE = CLAUDE_DIR / "tts_daemon.pid"
 CACHE_DIR = CLAUDE_DIR / "tts_cache"
 LOG_FILE = CLAUDE_DIR / "tts_daemon.log"
 CONFIG_PATH = CLAUDE_DIR / "tts_config.json"
+
+# HTTP Server
+HTTP_PORT = 8787
+STATIC_DIR = Path(__file__).parent / "static"
 
 # Gemini Config
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -50,7 +61,7 @@ MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 # Presets
 MODES = {
-    "summary": "Summarize briefly in 1-2 sentences, keep only the main point",
+    "summary": "Summarize what was done in 1 short sentence. State only facts: what action was completed. No emotions, no hopes, no commentary, no 'I hope', no 'should work now'. Just the action. Example: 'Updated the hook file' or 'Fixed the socket path'",
     "full": "Read the text as provided, naturally"
 }
 
@@ -92,6 +103,34 @@ def load_config() -> dict:
         except (json.JSONDecodeError, IOError) as e:
             logger.warning(f"Failed to load config: {e}, using defaults")
     return DEFAULT_CONFIG.copy()
+
+
+def save_config(config: dict) -> bool:
+    """Save config to file."""
+    try:
+        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+        return True
+    except IOError as e:
+        logger.error(f"Failed to save config: {e}")
+        return False
+
+
+def validate_config(config: dict) -> tuple[bool, str]:
+    """Validate config values. Returns (is_valid, error_message)."""
+    if config.get("voice") and config["voice"] not in VOICES:
+        return False, f"Invalid voice: {config['voice']}"
+    if config.get("mode") and config["mode"] not in MODES:
+        return False, f"Invalid mode: {config['mode']}"
+    if config.get("language") and config["language"] not in LANGUAGES:
+        return False, f"Invalid language: {config['language']}"
+    style = config.get("style", "")
+    custom_styles = config.get("custom_styles", {})
+    if style and style not in STYLES and style not in custom_styles:
+        return False, f"Invalid style: {style}"
+    max_chars = config.get("max_chars")
+    if max_chars is not None and (not isinstance(max_chars, int) or max_chars < 1 or max_chars > 10000):
+        return False, "max_chars must be between 1 and 10000"
+    return True, ""
 
 
 def build_instruction(config: dict) -> str:
@@ -551,6 +590,125 @@ class TTSDaemon:
 
         return server
 
+    # ========== HTTP API ==========
+
+    async def api_get_config(self, request):
+        """GET /api/config - return current config and available options."""
+        config = load_config()
+        return web.json_response({
+            "config": config,
+            "available": {
+                "voices": VOICES,
+                "modes": list(MODES.keys()),
+                "styles": list(STYLES.keys()),
+                "languages": list(LANGUAGES.keys())
+            }
+        })
+
+    async def api_post_config(self, request):
+        """POST /api/config - save config."""
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        # Merge with current config
+        current = load_config()
+        new_config = {**current, **data}
+
+        # Validate
+        is_valid, error = validate_config(new_config)
+        if not is_valid:
+            return web.json_response({"error": error}, status=400)
+
+        # Save
+        if save_config(new_config):
+            logger.info(f"Config updated via API: {data}")
+            return web.json_response({"status": "ok"})
+        else:
+            return web.json_response({"error": "Failed to save config"}, status=500)
+
+    async def api_preview(self, request):
+        """POST /api/preview - synthesize and play test text."""
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        text = data.get("text", "Hello, this is a test message.")
+        use_current_session = data.get("use_current_session", True)
+
+        # Use current daemon session config by default (faster, no reconnect)
+        if use_current_session and self.current_config:
+            tts_config = self.current_config
+        else:
+            # Use provided config or load saved
+            temp_config = data.get("config")
+            if temp_config:
+                current = load_config()
+                tts_config = {**current, **temp_config}
+            else:
+                tts_config = load_config()
+
+        logger.info(f"Preview request: {text[:50]}... (use_current_session={use_current_session})")
+        pcm_data = await self.synthesize_live(text, tts_config)
+
+        if pcm_data:
+            if HAS_SOUNDDEVICE:
+                audio_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+                def play_with_wait(audio):
+                    sd.play(audio, samplerate=SAMPLE_RATE)
+                    sd.wait()
+                    time.sleep(0.5)
+
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, play_with_wait, audio_array)
+
+            return web.json_response({"status": "ok"})
+        else:
+            return web.json_response({"error": "Synthesis failed"}, status=500)
+
+    async def api_status(self, request):
+        """GET /api/status - return daemon status."""
+        return web.json_response({
+            "connected": self.session is not None,
+            "current_voice": self.current_config.get("voice") if self.current_config else None,
+            "daemon_running": self.running
+        })
+
+    async def serve_index(self, request):
+        """Serve the main HTML page."""
+        index_path = STATIC_DIR / "index.html"
+        if index_path.exists():
+            return web.FileResponse(index_path)
+        else:
+            return web.Response(text="Web UI not found. Create static/index.html", status=404)
+
+    async def start_http_server(self):
+        """Start HTTP server for web UI."""
+        if not HAS_AIOHTTP:
+            logger.warning("aiohttp not installed, web UI disabled")
+            return None
+
+        app = web.Application()
+        app.router.add_get('/api/config', self.api_get_config)
+        app.router.add_post('/api/config', self.api_post_config)
+        app.router.add_post('/api/preview', self.api_preview)
+        app.router.add_get('/api/status', self.api_status)
+        app.router.add_get('/', self.serve_index)
+
+        # Serve static files if directory exists
+        if STATIC_DIR.exists():
+            app.router.add_static('/static/', STATIC_DIR)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, 'localhost', HTTP_PORT)
+        await site.start()
+        logger.info(f"Web UI available at http://localhost:{HTTP_PORT}")
+        return runner
+
     async def maintain_connection(self):
         """Keep WebSocket connection alive with periodic reconnection."""
         while self.running:
@@ -600,6 +758,9 @@ class TTSDaemon:
         try:
             # Start socket server
             server = await self.start_socket_server()
+
+            # Start HTTP server for web UI
+            http_runner = await self.start_http_server()
 
             # Initial connection with config
             tts_config = load_config()

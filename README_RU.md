@@ -74,6 +74,9 @@ cd claude-code-tts
 mkdir -p ~/.claude/hooks
 cp tts_daemon.py speak_hook.py ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.py
+
+# Скопируй конфиг (опционально, дефолты работают)
+cp tts_config.example.json ~/.claude/tts_config.json
 ```
 
 ### 4. Настрой Claude Code
@@ -111,7 +114,7 @@ python3 ~/.claude/hooks/tts_daemon.py
 
 ```bash
 # Тест daemon напрямую
-echo "Привет, это тест" | nc -U ~/.claude/tts.sock
+echo "Привет, это тест" | nc -U /tmp/claude-tts.sock
 
 # Проверить статус daemon
 pgrep -f tts_daemon.py
@@ -133,9 +136,29 @@ pkill -f tts_daemon.py
 
 ## Настройка
 
-### Голоса
+Создай `~/.claude/tts_config.json` (или скопируй из `tts_config.example.json`):
 
-Измени `VOICE` в `tts_daemon.py`:
+```json
+{
+  "mode": "summary",
+  "voice": "Aoede",
+  "style": "asmr",
+  "language": "russian",
+  "max_chars": 1000,
+  "custom_styles": {}
+}
+```
+
+**Изменения применяются мгновенно** — перезапуск daemon не нужен.
+
+### Режимы
+
+| Режим | Поведение |
+|-------|-----------|
+| `summary` | Суммаризирует в 1-2 предложения (по умолчанию) |
+| `full` | Читает текст как есть |
+
+### Голоса
 
 | Голос | Характер |
 |-------|----------|
@@ -148,6 +171,36 @@ pkill -f tts_daemon.py
 | Orus | Чёткий, отчётливый |
 | Zephyr | Лёгкий, свежий |
 
+### Стили
+
+| Стиль | Поведение |
+|-------|-----------|
+| `asmr` | Мягко, нежно, с паузами (по умолчанию) |
+| `neutral` | Естественно и чётко |
+| `energetic` | С энергией и энтузиазмом |
+
+Кастомные стили:
+```json
+{
+  "custom_styles": {
+    "mentor": "Speak like a wise mentor, calm and thoughtful"
+  }
+}
+```
+Затем используй: `"style": "mentor"`
+
+### Языки
+
+| Язык | Ключ |
+|------|------|
+| Русский | `russian` (по умолчанию) |
+| Английский | `english` |
+| Немецкий | `german` |
+| Испанский | `spanish` |
+| Французский | `french` |
+| Китайский | `chinese` |
+| Японский | `japanese` |
+
 ### Пути
 
 ```
@@ -155,8 +208,8 @@ pkill -f tts_daemon.py
 ├── hooks/
 │   ├── tts_daemon.py      # Daemon
 │   └── speak_hook.py      # Хук
+├── tts_config.json        # Конфигурация (создай из примера)
 ├── tts_cache/             # Кэш аудио файлов
-├── tts.sock               # Unix socket
 ├── tts_daemon.pid         # PID daemon
 └── tts_daemon.log         # Логи daemon
 ```
@@ -182,7 +235,7 @@ pgrep -f tts_daemon.py
 cat ~/.claude/tts_daemon.log
 
 # Удали устаревший socket/pid
-rm -f ~/.claude/tts.sock ~/.claude/tts_daemon.pid
+rm -f /tmp/claude-tts.sock ~/.claude/tts_daemon.pid
 ```
 
 ### Нет звука

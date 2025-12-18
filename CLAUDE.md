@@ -78,7 +78,7 @@ python3 tts_daemon.py --debug
 
 ### Test
 ```bash
-echo "Hello world" | nc -U ~/.claude/tts.sock
+echo "Hello world" | nc -U /tmp/claude-tts.sock
 ```
 
 ### Logs
