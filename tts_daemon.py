@@ -21,9 +21,20 @@ import struct
 import sys
 import subprocess
 import tempfile
+import threading
+import time
 import wave
 from pathlib import Path
+from queue import Queue, Empty
 from typing import Optional
+
+# Optional streaming audio support
+try:
+    import sounddevice as sd
+    import numpy as np
+    HAS_SOUNDDEVICE = True
+except ImportError:
+    HAS_SOUNDDEVICE = False
 
 # Paths
 CLAUDE_DIR = Path.home() / ".claude"
@@ -106,6 +117,105 @@ def build_instruction(config: dict) -> str:
         parts.append(LANGUAGES[lang])
 
     return ". ".join(parts) + "."
+
+
+class StreamingAudioPlayer:
+    """Low-latency audio player using sounddevice with queue-based streaming."""
+
+    def __init__(self, sample_rate: int = 24000, channels: int = 1, pre_buffer_chunks: int = 2):
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.pre_buffer_chunks = pre_buffer_chunks
+        self.queue: Queue = Queue()
+        self.stream = None
+        self.started = False
+        self.finished = False
+        self.chunks_received = 0
+        self.lock = threading.Lock()
+        self.total_bytes_fed = 0
+
+    def _audio_callback(self, outdata, frames, time_info, status):
+        """Callback called by sounddevice to fill audio buffer."""
+        if status:
+            logger.warning(f"Audio callback status: {status}")
+
+        bytes_needed = frames * self.channels * 2  # 16-bit = 2 bytes
+        data = b''
+
+        while len(data) < bytes_needed:
+            try:
+                chunk = self.queue.get_nowait()
+                data += chunk
+            except Empty:
+                if self.finished:
+                    # No more data coming, pad with silence
+                    data += b'\x00' * (bytes_needed - len(data))
+                    break
+                else:
+                    # Underrun - pad with silence and continue
+                    data += b'\x00' * (bytes_needed - len(data))
+                    break
+
+        # Trim if we got too much
+        data = data[:bytes_needed]
+
+        # Convert to numpy array
+        audio_array = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        outdata[:] = audio_array.reshape(-1, self.channels)
+
+    def start(self):
+        """Start the audio stream."""
+        if self.started:
+            return
+        self.started = True
+        self.stream = sd.OutputStream(
+            samplerate=self.sample_rate,
+            channels=self.channels,
+            dtype=np.float32,
+            callback=self._audio_callback,
+            blocksize=1024
+        )
+        self.stream.start()
+        logger.debug("Audio stream started")
+
+    def feed(self, pcm_data: bytes):
+        """Feed PCM data to the player."""
+        self.queue.put(pcm_data)
+        self.chunks_received += 1
+        self.total_bytes_fed += len(pcm_data)
+
+        # Start playback after pre-buffer is filled
+        if not self.started and self.chunks_received >= self.pre_buffer_chunks:
+            self.start()
+
+    def finish(self):
+        """Signal that no more data is coming."""
+        self.finished = True
+
+        # If we never started (very short audio), start now
+        if not self.started and self.chunks_received > 0:
+            self.start()
+
+    async def wait_done(self, timeout: float = 30.0):
+        """Wait for playback to complete."""
+        if not self.stream:
+            return
+
+        # Calculate expected duration based on total bytes fed
+        duration = self.total_bytes_fed / (self.sample_rate * self.channels * 2)  # 2 bytes per Int16 sample
+        logger.debug(f"Expecting {duration:.2f}s of audio ({self.total_bytes_fed} bytes)")
+
+        # Wait for queue to drain
+        while not self.queue.empty():
+            await asyncio.sleep(0.05)
+
+        # Sleep for the expected duration to let audio finish playing
+        await asyncio.sleep(duration)
+
+        self.stream.stop()
+        self.stream.close()
+        logger.debug("Audio stream closed")
+
 
 # Audio config
 SAMPLE_RATE = 24000
@@ -262,8 +372,8 @@ class TTSDaemon:
                 return True
         return False
 
-    async def synthesize_live(self, text: str, tts_config: dict) -> Optional[bytes]:
-        """Synthesize speech using Live API WebSocket."""
+    async def synthesize_live(self, text: str, tts_config: dict, player: Optional['StreamingAudioPlayer'] = None) -> Optional[bytes]:
+        """Synthesize speech using Live API WebSocket with optional streaming playback."""
         from google.genai import types
 
         # Reconnect if config changed
@@ -288,7 +398,7 @@ class TTSDaemon:
                 turn_complete=True
             )
 
-            # Collect audio chunks
+            # Collect audio chunks (for cache) while streaming to player
             audio_chunks = []
             async for response in self.session.receive():
                 logger.debug(f"API response: {type(response).__name__}, has_server_content={bool(response.server_content)}")
@@ -297,14 +407,24 @@ class TTSDaemon:
                     if response.server_content.model_turn:
                         parts_count = len(response.server_content.model_turn.parts)
                         logger.debug(f"model_turn: {parts_count} parts")
-                        for part in response.server_content.model_turn.parts:
+                        for i, part in enumerate(response.server_content.model_turn.parts):
+                            logger.debug(f"Part {i}: has_inline_data={bool(part.inline_data)}, has_text={bool(part.text if hasattr(part, 'text') else False)}")
+                            if part.inline_data:
+                                logger.debug(f"  inline_data.mime_type={part.inline_data.mime_type if hasattr(part.inline_data, 'mime_type') else 'N/A'}")
+                                logger.debug(f"  inline_data.has_data={bool(part.inline_data.data)}")
                             if part.inline_data and part.inline_data.data:
-                                logger.debug(f"Audio chunk: {len(part.inline_data.data)} bytes")
-                                audio_chunks.append(part.inline_data.data)
+                                chunk = part.inline_data.data
+                                logger.debug(f"Audio chunk: {len(chunk)} bytes")
+                                audio_chunks.append(chunk)
+                                # Stream to player immediately
+                                if player:
+                                    player.feed(chunk)
 
                     # Check if turn is complete
                     if response.server_content.turn_complete:
                         logger.debug(f"Turn complete, total chunks: {len(audio_chunks)}")
+                        if player:
+                            player.finish()
                         break
 
             if audio_chunks:
@@ -345,7 +465,11 @@ class TTSDaemon:
         # Check cache
         if cache_path.exists():
             logger.debug(f"Cache hit: {text[:50]}...")
-            self.play_audio_async(cache_path)
+            if HAS_SOUNDDEVICE:
+                # Stream from cache file
+                await self.play_cached_streaming(cache_path)
+            else:
+                self.play_audio_async(cache_path)
             return
 
         # Synthesize
@@ -353,11 +477,46 @@ class TTSDaemon:
         pcm_data = await self.synthesize_live(text, tts_config)
 
         if pcm_data:
-            # Save to cache and play
+            # Save to cache first
             self.save_audio(pcm_data, cache_path)
-            self.play_audio_async(cache_path)
+
+            # Play using direct method
+            if HAS_SOUNDDEVICE:
+                logger.debug("Starting playback via sounddevice")
+                audio_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+                duration = len(audio_array) / SAMPLE_RATE
+                logger.debug(f"Audio duration: {duration:.2f}s")
+
+                def play_with_wait(audio):
+                    sd.play(audio, samplerate=SAMPLE_RATE)
+                    sd.wait()
+                    time.sleep(0.5)  # buffer to ensure audio hardware finishes
+
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, play_with_wait, audio_array)
+                logger.debug("Playback completed")
+            else:
+                self.play_audio_async(cache_path)
         else:
             logger.error("Synthesis failed")
+
+    async def play_cached_streaming(self, cache_path: Path):
+        """Play cached audio file using direct playback."""
+        import wave
+        with wave.open(str(cache_path), 'rb') as wf:
+            pcm_data = wf.readframes(wf.getnframes())
+
+        audio_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+        duration = len(audio_array) / SAMPLE_RATE
+        logger.debug(f"Playing cached audio: {duration:.2f}s")
+
+        def play_with_wait(audio):
+            sd.play(audio, samplerate=SAMPLE_RATE)
+            sd.wait()
+            time.sleep(0.5)  # buffer to ensure audio hardware finishes
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, play_with_wait, audio_array)
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle incoming socket connection."""
